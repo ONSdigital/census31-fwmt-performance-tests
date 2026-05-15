@@ -1,0 +1,17 @@
+version: "3.8"
+services:
+  web:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      - NODE_ENV=production
+      - RABBITMQ_HOST= '10.202.232.219'
+      - RABBITMQ_PORT= '5672'
+      - RABBITMQ_VHOST= '/'
+      - RABBITMQ_EXCHANGE= 'adapter-outbound-exchange'
+      - RABBITMQ_USER= 'admin'
+      - RABBITMQ_PASSWORD= 'admin'
+      - RABBITMQ_QUEUENAME= 'RM.Field'
+      - CASES_TO_FETCH= "10"
+      - TMMOCK_API_URL= "http://fwmtgatewaytmmock:8000/cases/"

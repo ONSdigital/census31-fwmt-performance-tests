@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Pod
+metadata:
+   name: fwmtg-perf-test
+spec:
+  containers:
+  - name: perf-image
+    image: eu.gcr.io/census31-fwmt-gateway-perf/fwmtg-perf-tools
+    ports:
+    - containerPort: 8089
+    resources:
+      limits:
+        memory: 2Gi
+      requests:
+        cpu: 600m
