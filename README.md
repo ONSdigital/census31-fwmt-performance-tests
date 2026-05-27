@@ -30,6 +30,68 @@ FWMTG-perf-tests: Message simulator and load generator for performance testing o
 2) publish_cancel.py  : Simulates the behaviour of 'Create' followed by 'Cancel' . Generates 'Create' type messages followed by 'Cancel' messages .
 3) publish_update.py  : Simulates the behaviour of 'Create' followed by 'Update'. Generates 'Create' type messages followed by 'Update' messages . 
 4) testFiles.py 	  : Tracks message consumption and reports message consumption / processing rate.
+5) run-jobservice-perf.sh : Orchestrates a local Job Service perf run (preflight, optional purge, publish, log scrape, report).
+
+## Typical flow — local Job Service perf
+
+One-time setup:
+
+```bash
+cd census31-fwmt-performance-tests/Python
+pip install pika   # or: pipenv install
+```
+
+Pick **either** path below, then run the perf script from `Python/`.
+
+### Path A — Docker images (acceptance `docker-compose.yml`)
+
+| Step | Command |
+|------|---------|
+| 1. Start stack | `cd census31-fwmt-acceptance-tests` then `docker compose up -d rabbit postgres redis mock jobv4` |
+| 2. Wait for healthy containers | `docker ps` — expect `rabbit`, `jobv4`, etc. |
+| 3. Run perf | `cd census31-fwmt-performance-tests/Python` then `./run-jobservice-perf.sh --count 100 --scenario create --purge` |
+
+Uses Rabbit on **localhost:5672** (guest/guest). Tails logs from the **`jobv4`** container.
+
+### Path B — Spring Boot (acceptance harness, recommended for dev)
+
+Service startup lives in **`census31-fwmt-docs/acceptance-tests/`** (not in `census31-fwmt-acceptance-tests`). `run-acceptance-test.sh` only runs Cucumber; it does **not** start Job Service.
+
+| Step | Command |
+|------|---------|
+| 1. Start infra | `cd census31-fwmt-docs/acceptance-tests` then `./start-infra.sh` |
+| 2. Build jars (first time) | `./build-service.sh job-service` and `./build-service.sh tm-mock` — or use `--build-missing` on step 3 |
+| 3. Start apps | `./start-services.sh --build-missing job-service tm-mock` |
+| | Alternative: `./start-services.sh --boot-run job-service tm-mock` |
+| 4. Confirm job-service | `curl -fsS -u user:password http://localhost:8025/swagger-ui.html` |
+| 5. Run perf | `cd census31-fwmt-performance-tests/Python` then `./run-jobservice-perf.sh --local --count 100 --scenario create --purge` |
+
+Uses Rabbit on **localhost:5674** by default (`FWMT_RM_RABBIT_PORT`). Tails **`census31-fwmt-docs/acceptance-tests/logs/job-service.log`**.
+
+### Perf script options (both paths)
+
+```bash
+./run-jobservice-perf.sh --help
+
+./run-jobservice-perf.sh --count 500 --scenario create --purge
+./run-jobservice-perf.sh --local --count 500 --scenario cancel --purge
+./run-jobservice-perf.sh --local --rabbit-port 5674 --job-log /path/to/job-service.log
+./run-jobservice-perf.sh --skip-report --count 10    # publish + wait only
+```
+
+What the script does: preflight → optional queue purge (`RM.Field`, `RM.FieldDLQ`) → publish → wait for `RM_*_REQUEST_RECEIVED` in logs → build `jobservice.txt` → run `testFiles.py` (create scenario writes `Message_publish.txt`).
+
+### Stop / reset
+
+```bash
+# Path A
+cd census31-fwmt-acceptance-tests && docker compose down
+
+# Path B
+cd census31-fwmt-docs/acceptance-tests
+./stop-services.sh job-service tm-mock
+docker compose -f docker-compose-infra.yml down
+```
 
 ## How to run perf tests
 

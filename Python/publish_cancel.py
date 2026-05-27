@@ -3,10 +3,9 @@ from datetime import datetime
 import uuid
 import json  
 #import psycopg2
-from config import Config as cfg
+from config import Config as cfg, rabbit_connection_parameters
 
-credentials = pika.PlainCredentials(cfg.RABBITMQ_USER, cfg.RABBITMQ_PASSWORD)
-connection = pika.BlockingConnection(pika.ConnectionParameters(host=cfg.RABBITMQ_HOST, credentials=credentials))
+connection = pika.BlockingConnection(rabbit_connection_parameters())
 channel = connection.channel() 
 #channel.queue_declare(queue=cfg.RABBITMQ_QUEUENAME) 
 
