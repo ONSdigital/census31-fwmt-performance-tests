@@ -321,25 +321,29 @@ for line in sys.stdin:
 ' >"$JOBSERVICE_FILE"
 }
 
-LOG_PID=""
-LOG_GROUP_PID=""
+LOG_TAIL_PID=""
+
+stop_log_capture() {
+  # Single background writer (no tail|tee pipeline) so $! is always the process we kill.
+  if [[ -n "$LOG_TAIL_PID" ]]; then
+    kill "$LOG_TAIL_PID" 2>/dev/null || true
+    local waited=0
+    while kill -0 "$LOG_TAIL_PID" 2>/dev/null && [[ "$waited" -lt 20 ]]; do
+      sleep 0.1
+      waited=$(( waited + 1 ))
+    done
+    kill -9 "$LOG_TAIL_PID" 2>/dev/null || true
+    wait "$LOG_TAIL_PID" 2>/dev/null || true
+    LOG_TAIL_PID=""
+  fi
+  # Belt-and-braces: orphaned tail from an older pipeline-based run.
+  if [[ "$MODE" == "local" && -n "$JOB_LOG_FILE" ]]; then
+    pkill -f "tail -n 0 -F ${JOB_LOG_FILE}" 2>/dev/null || true
+  fi
+}
 
 cleanup() {
-  # Bash 3.2 quirks (macOS /bin/bash):
-  #   1. `$!` after `cmd1 | cmd2 &` returns the LAST PID (tee), not the first (tail).
-  #   2. `wait $!` on a backgrounded pipeline blocks until the WHOLE pipeline ends,
-  #      so a `tail -F` that never gets SIGPIPE wedges the script forever.
-  # Fix: wrap the pipeline in its own subshell, capture that subshell's PID, and
-  # kill the entire process group. Don't `wait` on it.
-  if [[ -n "$LOG_GROUP_PID" ]]; then
-    kill -- "-${LOG_GROUP_PID}" 2>/dev/null || true
-    kill "$LOG_GROUP_PID" 2>/dev/null || true
-  fi
-  if [[ -n "$LOG_PID" ]]; then
-    kill "$LOG_PID" 2>/dev/null || true
-  fi
-  pkill -P $$ -x tail 2>/dev/null || true
-  pkill -P $$ -x tee  2>/dev/null || true
+  stop_log_capture
 }
 
 trap cleanup EXIT INT TERM
@@ -348,13 +352,12 @@ start_log_capture() {
   rm -f "$RAW_LOG_FILE"
   if [[ "$MODE" == "docker" ]]; then
     log "Tailing docker logs from '$JOB_CONTAINER' (pattern: $LOG_EVENT_PATTERN)..."
-    ( set -m; docker logs -f "$JOB_CONTAINER" 2>&1 | tee "$RAW_LOG_FILE" ) &
+    docker logs -f "$JOB_CONTAINER" >>"$RAW_LOG_FILE" 2>&1 &
   else
     log "Tailing log file '$JOB_LOG_FILE' (pattern: $LOG_EVENT_PATTERN)..."
-    ( set -m; tail -n 0 -F "$JOB_LOG_FILE" 2>/dev/null | tee "$RAW_LOG_FILE" ) &
+    tail -n 0 -F "$JOB_LOG_FILE" >>"$RAW_LOG_FILE" 2>/dev/null &
   fi
-  LOG_GROUP_PID=$!
-  LOG_PID=$LOG_GROUP_PID
+  LOG_TAIL_PID=$!
 }
 
 # --- Preflight ---
@@ -439,9 +442,7 @@ if [[ "$received" -lt "$COUNT" ]]; then
   log "WARN: only $received / $COUNT events after timeout; continuing"
 fi
 
-cleanup
-LOG_PID=""
-LOG_GROUP_PID=""
+stop_log_capture
 trap - EXIT INT TERM
 
 # --- Build jobservice.txt for testFiles.py ---
