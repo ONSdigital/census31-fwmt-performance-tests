@@ -55,18 +55,18 @@ Uses Rabbit on **localhost:5672** (guest/guest). Tails logs from the **`jobv4`**
 
 ### Path B — Spring Boot (acceptance harness, recommended for dev)
 
-Service startup lives in **`census31-fwmt-docs/acceptance-tests/`** (not in `census31-fwmt-acceptance-tests`). `run-acceptance-test.sh` only runs Cucumber; it does **not** start Job Service.
+Service startup lives in **`census31-fwmt-acceptance-tests/scripts/`**. `run-acceptance-test.sh` only runs Cucumber; use `start-services.sh` or **`./run-all.sh --no-tests`** to start apps.
 
 | Step | Command |
 |------|---------|
-| 1. Start infra | `cd census31-fwmt-docs/acceptance-tests` then `./start-infra.sh` |
+| 1. Start infra | `cd census31-fwmt-acceptance-tests/scripts` then `./start-infra.sh` |
 | 2. Build jars (first time) | `./build-service.sh job-service` and `./build-service.sh tm-mock` — or use `--build-missing` on step 3 |
 | 3. Start apps | `./start-services.sh --build-missing job-service tm-mock` |
 | | Alternative: `./start-services.sh --boot-run job-service tm-mock` |
 | 4. Confirm job-service | `curl -fsS -u user:password http://localhost:8025/swagger-ui.html` |
 | 5. Run perf | `cd census31-fwmt-performance-tests/Python` then `./run-jobservice-perf.sh --local --count 100 --scenario create --purge` |
 
-Uses Rabbit on **localhost:5674** by default (`FWMT_RM_RABBIT_PORT`). Tails **`census31-fwmt-docs/acceptance-tests/logs/job-service.log`**.
+Uses Rabbit on **localhost:5674** by default (`FWMT_RM_RABBIT_PORT`). Tails **`census31-fwmt-acceptance-tests/scripts/logs/job-service.log`**.
 
 ### Perf script options (both paths)
 
@@ -81,6 +81,36 @@ Uses Rabbit on **localhost:5674** by default (`FWMT_RM_RABBIT_PORT`). Tails **`c
 
 What the script does: preflight → optional queue purge (`RM.Field`, `RM.FieldDLQ`) → publish → wait for `RM_*_REQUEST_RECEIVED` in logs → build `jobservice.txt` → run `testFiles.py` (create scenario writes `Message_publish.txt`).
 
+### Messaging backend — RabbitMQ or Google Pub/Sub
+
+The rig publishes to **RabbitMQ** by default, or to the **Pub/Sub emulator** when
+`--messaging pubsub` (or `FWMT_MESSAGING=pubsub`) is set. The publisher abstraction
+lives in `publisher.py`; the `publish_*.py` scripts are backend-agnostic. In both
+cases the field-worker instruction carries the `__TypeId__` discriminator the
+job-service codec requires — as an AMQP header (Rabbit) or a message attribute
+(Pub/Sub).
+
+The Job Service under test **must be started in the matching mode**, since its
+inbound adapters are gated on the messaging provider:
+
+```bash
+# Pub/Sub: start infra + emulator topics, then services in pubsub mode
+cd census31-fwmt-acceptance-tests/scripts
+./start-infra.sh
+FWMT_MESSAGING=pubsub ./setup-messaging.sh        # creates RM.Field topic + job-service-RM-Field sub
+FWMT_MESSAGING=pubsub ./start-services.sh --build-missing job-service tm-mock
+
+# then run perf against Pub/Sub (emulator on :8085 by default)
+cd census31-fwmt-performance-tests/Python
+FWMT_MESSAGING=pubsub ./run-jobservice-perf.sh --local --count 100 --scenario create --purge
+```
+
+For Pub/Sub, `--purge` drains the `job-service-RM-Field` subscription (there is no
+queue-purge primitive); preflight checks the emulator REST API instead of a Rabbit
+broker. Relevant env vars: `FWMT_PUBSUB_HOST`, `FWMT_PUBSUB_EMULATOR_PORT`
+(default `8085`), `FWMT_PUBSUB_PROJECT` (default `fwmt-local`), `FWMT_PUBSUB_TOPIC`
+(default `RM.Field`), `FWMT_PUBSUB_DRAIN_SUB` (default `job-service-RM-Field`).
+
 ### Stop / reset
 
 ```bash
@@ -88,7 +118,7 @@ What the script does: preflight → optional queue purge (`RM.Field`, `RM.FieldD
 cd census31-fwmt-acceptance-tests && docker compose down
 
 # Path B
-cd census31-fwmt-docs/acceptance-tests
+cd census31-fwmt-acceptance-tests/scripts
 ./stop-services.sh job-service tm-mock
 docker compose -f docker-compose-infra.yml down
 ```

@@ -24,6 +24,7 @@ DEFAULT_LOCAL_JOB_LOG="${FWMT_LOG_DIR:-$ACCEPTANCE_HARNESS_DIR/logs}/job-service
 COUNT="${CASES_TO_FETCH:-10}"
 SCENARIO="create"
 MODE="docker"
+MESSAGING="${FWMT_MESSAGING:-rabbit}"
 RABBIT_HOST="${RABBITMQ_HOST:-localhost}"
 RABBIT_PORT="${RABBITMQ_PORT:-5672}"
 RABBIT_USER="${RABBITMQ_USERNAME:-guest}"
@@ -31,6 +32,14 @@ RABBIT_PASSWORD="${RABBITMQ_PASSWORD:-guest}"
 RABBIT_VHOST="${RABBITMQ_VHOST:-/}"
 QUEUE_NAME="${RABBIT_QUEUENAME:-RM.Field}"
 DLQ_NAME="${RM_FIELD_DLQ:-RM.FieldDLQ}"
+
+# Pub/Sub emulator (mirrors census31-fwmt-acceptance-tests/scripts/setup-pubsub.sh)
+PUBSUB_HOST="${FWMT_PUBSUB_HOST:-localhost}"
+PUBSUB_PORT="${FWMT_PUBSUB_EMULATOR_PORT:-8085}"
+PUBSUB_PROJECT="${FWMT_PUBSUB_PROJECT:-fwmt-local}"
+PUBSUB_TOPIC="${FWMT_PUBSUB_TOPIC:-$QUEUE_NAME}"
+# Service subscription drained in lieu of a Rabbit queue purge.
+PUBSUB_DRAIN_SUB="${FWMT_PUBSUB_DRAIN_SUB:-job-service-RM-Field}"
 
 JOB_CONTAINER="${JOB_CONTAINER:-jobv4}"
 RABBIT_CONTAINER="${RABBIT_CONTAINER:-rabbit}"
@@ -57,12 +66,15 @@ Usage: run-jobservice-perf.sh [options]
 
   --count N              Number of messages (default: 10)
   --scenario TYPE        create | cancel | update (default: create)
-  --purge                Purge RM.Field and RM.FieldDLQ before run
+  --messaging BACKEND    rabbit | pubsub (default: rabbit; or set FWMT_MESSAGING)
+  --purge                Purge (rabbit) or drain (pubsub) before run
   --local                Spring Boot mode: no job Docker container; tail --job-log
   --docker               Job Service in Docker (default)
   --rabbit-host HOST     (default: localhost)
   --rabbit-port PORT     (default: 5672; local harness often uses 5674 — set FWMT_RM_RABBIT_PORT)
   --rabbit-container C   Docker container for Rabbit preflight (default: rabbit)
+  --pubsub-host HOST     Pub/Sub emulator host (default: localhost)
+  --pubsub-port PORT     Pub/Sub emulator port (default: 8085)
   --job-container C      Docker container for logs in --docker mode (default: jobv4)
   --job-port PORT        HTTP health on localhost (local default: 8025)
   --job-log FILE         Log file to tail in --local mode
@@ -74,9 +86,13 @@ Usage: run-jobservice-perf.sh [options]
 Local stack (before --local):
   cd $ACCEPTANCE_HARNESS_DIR    # census31-fwmt-acceptance-tests/scripts
   ./start-infra.sh
+  # Rabbit (default):
   ./start-services.sh --build-missing job-service tm-mock
+  # Pub/Sub: start the emulator + services in pubsub mode, e.g.
+  FWMT_MESSAGING=pubsub ./start-services.sh --build-missing job-service tm-mock
 
-Environment: CASES_TO_FETCH, RABBITMQ_*, FWMT_RM_RABBIT_PORT, JOB_LOG_FILE, CENSUS31_FWMT_ROOT
+Environment: CASES_TO_FETCH, FWMT_MESSAGING, RABBITMQ_*, FWMT_RM_RABBIT_PORT,
+             FWMT_PUBSUB_HOST/PORT/PROJECT/TOPIC, JOB_LOG_FILE, CENSUS31_FWMT_ROOT
 EOF
 }
 
@@ -84,12 +100,15 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --count) COUNT="$2"; shift 2 ;;
     --scenario) SCENARIO="$2"; shift 2 ;;
+    --messaging) MESSAGING="$2"; shift 2 ;;
     --purge) PURGE=true; shift ;;
     --local) MODE="local"; shift ;;
     --docker) MODE="docker"; shift ;;
     --rabbit-host) RABBIT_HOST="$2"; shift 2 ;;
     --rabbit-port) RABBIT_PORT="$2"; shift 2 ;;
     --rabbit-container) RABBIT_CONTAINER="$2"; shift 2 ;;
+    --pubsub-host) PUBSUB_HOST="$2"; shift 2 ;;
+    --pubsub-port) PUBSUB_PORT="$2"; shift 2 ;;
     --job-container) JOB_CONTAINER="$2"; shift 2 ;;
     --job-port) JOB_PORT="$2"; shift 2 ;;
     --job-log) JOB_LOG_FILE="$2"; shift 2 ;;
@@ -106,6 +125,14 @@ if [[ "$MODE" == "local" ]]; then
   JOB_PORT="${JOB_PORT:-8025}"
   JOB_LOG_FILE="${JOB_LOG_FILE:-$DEFAULT_LOCAL_JOB_LOG}"
 fi
+
+MESSAGING="$(printf '%s' "$MESSAGING" | tr '[:upper:]' '[:lower:]')"
+case "$MESSAGING" in
+  rabbit|pubsub) ;;
+  *) echo "Invalid --messaging '$MESSAGING' (expected rabbit or pubsub)" >&2; exit 1 ;;
+esac
+
+PUBSUB_API_BASE="http://${PUBSUB_HOST}:${PUBSUB_PORT}/v1/projects/${PUBSUB_PROJECT}"
 
 log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 die() { log "ERROR: $*"; exit 1; }
@@ -140,6 +167,24 @@ check_rabbit_docker() {
   log "WARN: container '$RABBIT_CONTAINER' not running; relying on TCP check only"
 }
 
+check_pubsub_emulator() {
+  if ! curl -fsS "${PUBSUB_API_BASE}/topics" -H "Content-Type: application/json" >/dev/null 2>&1; then
+    die "Cannot reach Pub/Sub emulator at ${PUBSUB_HOST}:${PUBSUB_PORT} (project ${PUBSUB_PROJECT}).
+  Start infra and bootstrap topics first, e.g.:
+  cd $ACCEPTANCE_HARNESS_DIR && ./start-infra.sh && FWMT_MESSAGING=pubsub ./setup-messaging.sh"
+  fi
+  log "OK: Pub/Sub emulator ${PUBSUB_HOST}:${PUBSUB_PORT} (project ${PUBSUB_PROJECT})"
+}
+
+check_broker() {
+  if [[ "$MESSAGING" == "pubsub" ]]; then
+    check_pubsub_emulator
+  else
+    check_rabbit_tcp
+    check_rabbit_docker
+  fi
+}
+
 check_job_health() {
   [[ "$SKIP_HEALTH" == true ]] && return
   [[ -z "$JOB_PORT" ]] && return
@@ -155,18 +200,16 @@ check_job_health() {
 }
 
 preflight_docker() {
-  log "Preflight: Docker mode..."
-  require_container "$RABBIT_CONTAINER"
+  log "Preflight: Docker mode (messaging: $MESSAGING)..."
+  [[ "$MESSAGING" == "rabbit" ]] && require_container "$RABBIT_CONTAINER"
   require_container "$JOB_CONTAINER"
-  check_rabbit_tcp
-  check_rabbit_docker
+  check_broker
   check_job_health
 }
 
 preflight_local() {
-  log "Preflight: local Spring Boot mode..."
-  check_rabbit_tcp
-  check_rabbit_docker
+  log "Preflight: local Spring Boot mode (messaging: $MESSAGING)..."
+  check_broker
   check_job_health
   if [[ ! -f "$JOB_LOG_FILE" ]]; then
     die "Job log not found: $JOB_LOG_FILE — start services first, e.g.:
@@ -208,6 +251,41 @@ for q in queues:
         print(f"WARN: could not purge {q}: {exc}")
 conn.close()
 PY
+}
+
+drain_pubsub() {
+  log "Draining Pub/Sub subscription: $PUBSUB_DRAIN_SUB"
+  local sub_url="${PUBSUB_API_BASE}/subscriptions/${PUBSUB_DRAIN_SUB}"
+  local pulled=0
+  while true; do
+    local response
+    response="$(curl -fsS -X POST "${sub_url}:pull" \
+      -H "Content-Type: application/json" \
+      -d '{"maxMessages":500,"returnImmediately":true}' 2>/dev/null || true)"
+    if [[ -z "$response" || "$response" != *"ackId"* ]]; then
+      break
+    fi
+    local ack_ids
+    ack_ids="$(printf '%s' "$response" \
+      | grep -o '"ackId"[[:space:]]*:[[:space:]]*"[^"]*"' \
+      | sed 's/.*"\([^"]*\)"$/\1/')"
+    [[ -z "$ack_ids" ]] && break
+    local json_ids
+    json_ids="$(printf '%s' "$ack_ids" | awk 'BEGIN{ORS=""} {printf "%s\"%s\"", (NR>1?",":""), $0}')"
+    curl -fsS -X POST "${sub_url}:acknowledge" \
+      -H "Content-Type: application/json" \
+      -d "{\"ackIds\":[${json_ids}]}" >/dev/null 2>&1 || true
+    pulled=$(( pulled + $(printf '%s\n' "$ack_ids" | grep -c . ) ))
+  done
+  log "Drained $pulled message(s) from $PUBSUB_DRAIN_SUB"
+}
+
+purge_messaging() {
+  if [[ "$MESSAGING" == "pubsub" ]]; then
+    drain_pubsub
+  else
+    purge_queues
+  fi
 }
 
 build_jobservice_file() {
@@ -286,10 +364,14 @@ else
   preflight_docker
 fi
 
-if ! "$PYTHON" -c "import pika" 2>/dev/null; then
-  die "Python package 'pika' not installed (pip install pika, or pipenv install in $SCRIPT_DIR)"
+if [[ "$MESSAGING" == "rabbit" ]]; then
+  if ! "$PYTHON" -c "import pika" 2>/dev/null; then
+    die "Python package 'pika' not installed (pip install pika, or pipenv install in $SCRIPT_DIR)"
+  fi
+  log "OK: $PYTHON with pika"
+else
+  log "OK: $PYTHON (pubsub publisher uses stdlib urllib)"
 fi
-log "OK: $PYTHON with pika"
 
 # --- Scenario ---
 case "$SCENARIO" in
@@ -313,7 +395,7 @@ esac
 [[ -f "$PUBLISH_SCRIPT" ]] || die "Missing $PUBLISH_SCRIPT"
 
 if [[ "$PURGE" == true ]]; then
-  purge_queues
+  purge_messaging
 fi
 
 rm -f "$MESSAGE_PUBLISH_FILE" "$JOBSERVICE_FILE"
@@ -322,14 +404,19 @@ log "Cleared artefact files"
 start_log_capture
 
 # --- Publish ---
-log "Publishing $COUNT message(s) via $PUBLISH_SCRIPT..."
+log "Publishing $COUNT message(s) via $PUBLISH_SCRIPT (messaging: $MESSAGING)..."
 export CASES_TO_FETCH="$COUNT"
+export FWMT_MESSAGING="$MESSAGING"
 export RABBITMQ_HOST="$RABBIT_HOST"
 export RABBITMQ_PORT="$RABBIT_PORT"
 export RABBITMQ_USERNAME="$RABBIT_USER"
 export RABBITMQ_PASSWORD="$RABBIT_PASSWORD"
 export RABBITMQ_VHOST="$RABBIT_VHOST"
 export RABBIT_QUEUENAME="$QUEUE_NAME"
+export FWMT_PUBSUB_HOST="$PUBSUB_HOST"
+export FWMT_PUBSUB_EMULATOR_PORT="$PUBSUB_PORT"
+export FWMT_PUBSUB_PROJECT="$PUBSUB_PROJECT"
+export FWMT_PUBSUB_TOPIC="$PUBSUB_TOPIC"
 
 "$PYTHON" "$PUBLISH_SCRIPT"
 log "Publish finished"

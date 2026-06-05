@@ -1,13 +1,8 @@
-import pika
 from datetime import datetime
 import uuid
-import json  
-#import psycopg2
-from config import Config as cfg, rabbit_connection_parameters
-
-connection = pika.BlockingConnection(rabbit_connection_parameters())
-channel = connection.channel() 
-#channel.queue_declare(queue=cfg.RABBITMQ_QUEUENAME) 
+import json
+from config import Config as cfg
+from publisher import get_publisher, TYPE_ID_CREATE, TYPE_ID_CANCEL
 
 CREATE_DATA= {
     "blankFormReturned": "null",
@@ -52,36 +47,29 @@ class StopWatch():
 
 def get_createcases(num_of_cases_to_fetch=int(cfg.CASES_TO_FETCH)):
     json_str = json.dumps(CREATE_DATA)
-   
+
     data = json.loads(json_str)
-    for i in range(num_of_cases_to_fetch):
-        data["caseId"] = str(uuid.uuid4())
-        message = json.dumps(data)  
+    publisher = get_publisher()
+    try:
+        for i in range(num_of_cases_to_fetch):
+            data["caseId"] = str(uuid.uuid4())
+            message = json.dumps(data)
+            publisher.publish(TYPE_ID_CREATE, message)
 
-        props = pika.BasicProperties(content_type='application/json', headers = { '__TypeId__':'uk.gov.ons.census.fwmt.common.rm.dto.FwmtActionInstruction',
-                'content_type':'application/json'}) 
-                                    #             '__TypeId__':'uk.gov.ons.census.fwmt.common.rm.dto.FwmtActionInstruction'}})
-        channel.basic_publish(exchange='', routing_key=cfg.RABBITMQ_QUEUENAME, body=message, properties = props) 
+            canceldata = data;
+            canceldata['actionInstruction'] = 'CANCEL';
 
-    
-        canceldata = data;
-        canceldata['actionInstruction'] = 'CANCEL';
-        
-        cancelprops = pika.BasicProperties(content_type='application/json', headers = { '__TypeId__':'uk.gov.ons.census.fwmt.common.rm.dto.FwmtCancelActionInstruction',
-            'content_type':'application/json'}) 
-        cancelmessage = json.dumps(canceldata)
-        watch = StopWatch()
-        watch.start()
-        channel.basic_publish(exchange='', routing_key=cfg.RABBITMQ_QUEUENAME, body=cancelmessage, properties = cancelprops) 
-        watch.stop()
-        response_time=watch.elapsed_time()
-        current_time=datetime.now()
-            
-            #print ('Sent data with CaseId {} to RabbitMQ with Response_time of {:.3f}ms'.format(data['caseId'],response_time))
-            #print (' {:10} {:50} {:20} {:.3f}ms {:10} {:20} '.format('|',data['caseId'],'-',response_time,'ms',current_time ,'|'))
-        print (' {:10} {:50} {:20} {:%Y-%m-%d %H:%M:%S} {:10} {:20} '.format('|',data['caseId'],'-',current_time,'s','|'))
+            cancelmessage = json.dumps(canceldata)
+            watch = StopWatch()
+            watch.start()
+            publisher.publish(TYPE_ID_CANCEL, cancelmessage)
+            watch.stop()
+            response_time=watch.elapsed_time()
+            current_time=datetime.now()
 
-    connection.close()  
+            print (' {:10} {:50} {:20} {:%Y-%m-%d %H:%M:%S} {:10} {:20} '.format('|',data['caseId'],'-',current_time,'s','|'))
+    finally:
+        publisher.close()
 
 
 

@@ -1,14 +1,9 @@
-import pika
 from datetime import datetime
 import time
 import uuid
-import json  
-#import psycopg2
-from config import Config as cfg, rabbit_connection_parameters
-
-connection = pika.BlockingConnection(rabbit_connection_parameters())
-channel = connection.channel() 
-#channel.queue_declare(queue=cfg.RABBITMQ_QUEUENAME) 
+import json
+from config import Config as cfg
+from publisher import get_publisher, TYPE_ID_CREATE
 
 CREATE_DATA= {
     "blankFormReturned": "null",
@@ -53,33 +48,27 @@ class StopWatch():
 
 def get_createcases(num_of_cases_to_fetch=int(cfg.CASES_TO_FETCH)):
     json_str = json.dumps(CREATE_DATA)
-   
+
     data = json.loads(json_str)
     current_milli_time = int(round(time.time() * 1000))
-    for i in range(num_of_cases_to_fetch):
-        data["caseId"] = str(uuid.uuid4())
-        data["caseRef"] = "GWPERF_"+ str(uuid.uuid4())[:30]
-        message = json.dumps(data)
-        props = pika.BasicProperties(content_type='application/json',timestamp=current_milli_time, headers = { '__TypeId__':'uk.gov.ons.census.fwmt.common.rm.dto.FwmtActionInstruction',
-                'content_type':'application/json'})
-                                    #             '__TypeId__':'uk.gov.ons.census.fwmt.common.rm.dto.FwmtActionInstruction'}})
-        watch = StopWatch()
-        watch.start()
-        create_time=datetime.now()
-        channel.basic_publish(exchange='', routing_key=cfg.RABBITMQ_QUEUENAME, body=message, properties = props) 
-        watch.stop()
-        response_time=watch.elapsed_time()
-        write_data={data['caseId'],create_time}
-        
-            
-            #print ('Sent data with CaseId {} to RabbitMQ with Response_time of {:.3f}ms'.format(data['caseId'],response_time))
-            #print (' {:10} {:50} {:20} {:.3f}ms {:10} {:20} '.format('|',data['caseId'],'-',response_time,'ms',current_time ,'|'))
-        #print (' {:10} {:50} {:20} {:%Y-%m-%d %H:%M:%S} {:10} {:20} '.format('|',data['caseId'],'-',current_time,'s','|'))
-        f = open("Message_publish.txt","a")
-        f.write('{:50} {:10} {:%Y-%m-%d %H:%M:%S.%f} \n'.format(data['caseId'],'|',create_time))
-    time.sleep(10)
-    connection.close()  
-    f.close()
+    publisher = get_publisher()
+    f = open("Message_publish.txt", "a")
+    try:
+        for i in range(num_of_cases_to_fetch):
+            data["caseId"] = str(uuid.uuid4())
+            data["caseRef"] = "GWPERF_"+ str(uuid.uuid4())[:30]
+            message = json.dumps(data)
+            watch = StopWatch()
+            watch.start()
+            create_time=datetime.now()
+            publisher.publish(TYPE_ID_CREATE, message, timestamp_ms=current_milli_time)
+            watch.stop()
+            response_time=watch.elapsed_time()
+            f.write('{:50} {:10} {:%Y-%m-%d %H:%M:%S.%f} \n'.format(data['caseId'],'|',create_time))
+        time.sleep(10)
+    finally:
+        f.close()
+        publisher.close()
 
 
 if __name__ == '__main__':
