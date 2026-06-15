@@ -15,7 +15,6 @@ ADD testFiles.py /queloader/testFiles.py
 
 # Install the required dependencies via pip
 RUN pipenv install --deploy --system
-RUN pipenv install pika
 
 WORKDIR "/queloader"
 

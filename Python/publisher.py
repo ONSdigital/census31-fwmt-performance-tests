@@ -1,12 +1,8 @@
-"""Messaging abstraction for the Job Service perf rig.
+"""Pub/Sub publisher for the Job Service perf rig.
 
-Publishes field-worker instructions to either RabbitMQ (default) or the Google
-Pub/Sub emulator, selected by ``Config.FWMT_MESSAGING`` (env ``FWMT_MESSAGING``).
-
-Both backends carry the same ``__TypeId__`` discriminator the job-service codec
-requires (see census31-fwmt-common FieldWorkerInstructionJsonCodec):
-  - Rabbit: as an AMQP header.
-  - Pub/Sub: as a message attribute (base64 JSON in ``data``).
+Publishes field-worker instructions to the Google Pub/Sub emulator over the REST
+API. Message attributes carry the ``__TypeId__`` discriminator the job-service
+codec requires (see census31-fwmt-common FieldWorkerInstructionJsonCodec).
 """
 
 import base64
@@ -16,41 +12,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from config import Config as cfg, pubsub_api_base, rabbit_connection_parameters
+from config import Config as cfg, pubsub_api_base
 
 # Type ids accepted by census31-fwmt-common FieldWorkerInstructionJsonCodec.
 TYPE_ID_CREATE = "uk.gov.ons.census.fwmt.common.rm.dto.FwmtActionInstruction"
 TYPE_ID_CANCEL = "uk.gov.ons.census.fwmt.common.rm.dto.FwmtCancelActionInstruction"
 
 CONTENT_TYPE_JSON = "application/json"
-
-
-class RabbitPublisher:
-    """Publishes to the RM.Field queue over AMQP (parity with the legacy rig)."""
-
-    def __init__(self):
-        import pika
-        self._pika = pika
-        self._connection = pika.BlockingConnection(rabbit_connection_parameters())
-        self._channel = self._connection.channel()
-        self._queue = cfg.RABBITMQ_QUEUENAME
-
-    def publish(self, type_id, body, timestamp_ms=None):
-        headers = {"__TypeId__": type_id, "content_type": CONTENT_TYPE_JSON}
-        props = self._pika.BasicProperties(
-            content_type=CONTENT_TYPE_JSON,
-            headers=headers,
-            timestamp=timestamp_ms,
-        )
-        self._channel.basic_publish(
-            exchange="", routing_key=self._queue, body=body, properties=props
-        )
-
-    def close(self):
-        try:
-            self._connection.close()
-        except Exception:
-            pass
 
 
 class PubSubPublisher:
@@ -102,14 +70,5 @@ class PubSubPublisher:
 
 
 def get_publisher():
-    """Return a publisher for the configured backend (rabbit | pubsub)."""
-    backend = cfg.FWMT_MESSAGING
-    if backend == "pubsub":
-        return PubSubPublisher()
-    if backend == "rabbit":
-        return RabbitPublisher()
-    raise ValueError(
-        "Invalid FWMT_MESSAGING='{backend}' (expected 'rabbit' or 'pubsub')".format(
-            backend=backend
-        )
-    )
+    """Return the Pub/Sub publisher for the configured emulator topic."""
+    return PubSubPublisher()
